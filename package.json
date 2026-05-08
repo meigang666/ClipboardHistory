@@ -1,0 +1,58 @@
+{
+  "name": "clipboard-history",
+  "version": "1.0.0",
+  "description": "跨平台剪贴板历史管理器",
+  "main": "src/main/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "build": "electron-builder --win --x64 --dir",
+    "build:mac": "electron-builder --mac --x64 --dir",
+    "build:dir": "electron-builder --win --x64 --dir",
+    "build:all": "electron-builder --win --mac --x64"
+  },
+  "keywords": [
+    "clipboard",
+    "history",
+    "electron"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^32.3.3",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "sql.js": "^1.12.0"
+  },
+  "build": {
+    "appId": "com.clipboardhistory.app",
+    "productName": "ClipboardHistory",
+    "directories": {
+      "output": "release_v8"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["x64"]
+        }
+      ],
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "files": [
+      "src/**/*",
+      "node_modules/**/*"
+    ],
+    "afterPack": "./afterPack.js"
+  }
+}
