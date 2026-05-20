@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>剪贴板历史</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #E8F4FC;
+      color: #333;
+      padding: 16px;
+      min-height: 100vh;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 0;
+      border-bottom: 1px solid #E0E8F0;
+      margin-bottom: 16px;
+    }
+    .header h1 { font-size: 18px; }
+    .refresh-btn {
+      background: #4A90D9;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .refresh-btn:active { background: #3A7BC8; }
+    .item {
+      background: white;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .item.pinned { border-left: 3px solid #4A90D9; }
+    .item-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: #999;
+    }
+    .item-type { display: flex; align-items: center; gap: 4px; }
+    .item-content {
+      font-size: 14px;
+      line-height: 1.5;
+      word-break: break-all;
+      max-height: 100px;
+      overflow: hidden;
+    }
+    .item-content img { max-width: 100%; max-height: 120px; border-radius: 4px; }
+    .item-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #E0E8F0;
+    }
+    .btn {
+      flex: 1;
+      padding: 10px;
+      border: 1px solid #E0E8F0;
+      background: white;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+      text-align: center;
+    }
+    .btn.copy { background: #4CAF50; color: white; border-color: #4CAF50; }
+    .btn.copy:active { background: #45a049; }
+    .btn.delete { background: #ff4444; color: white; border-color: #ff4444; }
+    .btn.delete:active { background: #dd3333; }
+    .btn.pin { background: #4A90D9; color: white; border-color: #4A90D9; }
+    .btn.unpin { background: #999; color: white; border-color: #999; }
+    .empty { text-align: center; color: #999; padding: 40px 0; }
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.8);
+      color: white;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 14px;
+      z-index: 1000;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .toast.show { opacity: 1; }
+    .file-item { display: flex; align-items: center; gap: 12px; }
+    .file-icon { font-size: 24px; }
+    .file-name { font-weight: 500; }
+    .file-path { font-size: 12px; color: #999; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>剪贴板历史</h1>
+    <button class="refresh-btn" onclick="loadItems()">刷新</button>
+  </div>
+  <div id="list"></div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    var items = [];
+
+    function showToast(msg) {
+      var t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(function() { t.classList.remove('show'); }, 2000);
+    }
+
+    function formatTime(ts) {
+      var d = new Date(ts);
+      var now = new Date();
+      var diff = now - d;
+      if (diff < 60000) return '刚刚';
+      if (diff < 3600000) return Math.floor(diff/60000) + '分钟前';
+      if (diff < 86400000) return Math.floor(diff/3600000) + '小时前';
+      return d.toLocaleDateString();
+    }
+
+    function getTypeIcon(type) {
+      if (type === 'text') return 'T';
+      if (type === 'image') return 'I';
+      if (type === 'file') return 'F';
+      return '?';
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function renderContent(item) {
+      if (item.type === 'image') {
+        return '<img src="/api/image/' + encodeURIComponent(item.content) + '" alt="image">';
+      }
+      if (item.type === 'file') {
+        var name = item.content.split(/[\\\\/]/).pop();
+        return '<div class="file-item"><div><div class="file-name">' + escapeHtml(name) + '</div><div class="file-path">' + escapeHtml(item.content) + '</div></div></div>';
+      }
+      return '<div class="item-content">' + escapeHtml(item.content) + '</div>';
+    }
+
+    function escapeQuotes(str) {
+      return String(str).replace(/'/g, "\\'").replace(/\\/g, '\\\\');
+    }
+
+    function renderItems() {
+      var list = document.getElementById('list');
+      if (items.length === 0) {
+        list.innerHTML = '<div class="empty">暂无记录</div>';
+        return;
+      }
+      var html = '';
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        var pinnedClass = item.is_pinned ? ' pinned' : '';
+        var pinBtnClass = item.is_pinned ? 'unpin' : 'pin';
+        var pinBtnText = item.is_pinned ? '取消置顶' : '置顶';
+        html += '<div class="item' + pinnedClass + '">';
+        html += '<div class="item-header">';
+        html += '<span class="item-type">' + getTypeIcon(item.type) + ' ' + item.type + '</span>';
+        html += '<span>' + formatTime(item.created_at) + '</span>';
+        html += '</div>';
+        html += renderContent(item);
+        html += '<div class="item-actions">';
+        html += '<button class="btn copy" onclick="copyItem(' + item.id + ', \'' + escapeQuotes(item.type) + '\', \'' + escapeQuotes(item.content) + '\')">复制</button>';
+        html += '<button class="btn ' + pinBtnClass + '" onclick="togglePin(' + item.id + ', ' + item.is_pinned + ')">' + pinBtnText + '</button>';
+        html += '<button class="btn delete" onclick="deleteItem(' + item.id + ')">删除</button>';
+        html += '</div></div>';
+      }
+      list.innerHTML = html;
+    }
+
+    async function loadItems() {
+      try {
+        var res = await fetch('/api/items');
+        items = await res.json();
+        renderItems();
+      } catch (err) {
+        showToast('加载失败');
+      }
+    }
+
+    async function copyItem(id, type, content) {
+      try {
+        var res = await fetch('/api/copy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: type, content: content })
+        });
+        if (res.ok) showToast('已复制到电脑剪贴板');
+      } catch (err) {
+        showToast('复制失败');
+      }
+    }
+
+    async function togglePin(id, isPinned) {
+      try {
+        var url = isPinned ? '/api/unpin/' + id : '/api/pin/' + id;
+        await fetch(url, { method: 'POST' });
+        loadItems();
+      } catch (err) {
+        showToast('操作失败');
+      }
+    }
+
+    async function deleteItem(id) {
+      if (!confirm('确定删除?')) return;
+      try {
+        await fetch('/api/delete/' + id, { method: 'POST' });
+        showToast('已删除');
+        loadItems();
+      } catch (err) {
+        showToast('删除失败');
+      }
+    }
+
+    loadItems();
+  </script>
+</body>
+</html>

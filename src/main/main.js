@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, clipboard, nativeImage, globalShortcut, Tra
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const http = require('http');
 const { execSync } = require('child_process');
 const initSqlJs = require('sql.js');
 
@@ -50,6 +51,11 @@ let settings = {
   retentionDays: 3,
   autoStart: false
 };
+
+// Web server for mobile access
+let webServer = null;
+let webServerPort = 3847;
+let webServerRunning = false;
 
 // Ensure directories exist
 function ensureDirectories() {
@@ -165,40 +171,14 @@ function createWindow() {
 
 // Create tray
 function createTray() {
-  // Create simple default icon (blue square)
   const iconDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAAsTAAALEwEAmpwYAAAApklEQVQ4jWNgGAWjYBQMRsEoGAWjYBSMglEwCkbBKBgF1AxGRkb+QjAyMv5nZGT8z8jI+J+BgeE/AwPDfwYGBgaoAIyCoWYwMjL+Z2Rk/M/IyPifkZHxPyMj439GRkb4N4IMADnUCR1s7KQCAAAAAElFTkSuQmCC';
   const icon = nativeImage.createFromDataURL(iconDataUrl);
 
   tray = new Tray(icon);
-
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: 'Show',
-      click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
-        }
-      }
-    },
-    { type: 'separator' },
-    {
-      label: 'Exit',
-      click: () => {
-        app.isQuitting = true;
-        app.quit();
-      }
-    }
-  ]);
-
-  tray.setToolTip('ClipboardHistory');
-  tray.setContextMenu(contextMenu);
+  updateTrayMenu();
 
   tray.on('double-click', () => {
-    if (mainWindow) {
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
   });
 }
 
@@ -313,6 +293,167 @@ function stopClipboardWatcher() {
     clearInterval(clipboardWatcher);
     clipboardWatcher = null;
   }
+}
+
+// Get local IP
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return '127.0.0.1';
+}
+
+// Get all items for web server
+function getAllItems() {
+  if (!db) return [];
+  const results = [];
+  const stmt = db.prepare('SELECT * FROM clipboard_items ORDER BY is_pinned DESC, created_at DESC');
+  while (stmt.step()) {
+    results.push(stmt.getAsObject());
+  }
+  stmt.free();
+  return results;
+}
+
+// Web server for mobile access
+function startWebServer() {
+  if (webServer) return;
+
+  webServer = http.createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
+
+    if (req.url === '/' || req.url === '/index.html') {
+      try {
+        const html = fs.readFileSync(path.join(__dirname, 'mobile.html'), 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(html);
+      } catch (err) {
+        res.writeHead(500);
+        res.end('Error loading page');
+      }
+      return;
+    }
+
+    if (req.url === '/api/items' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(getAllItems()));
+      return;
+    }
+
+    if (req.url === '/api/copy' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { type, content } = JSON.parse(body);
+          if (type === 'text') {
+            clipboard.writeText(content);
+            lastText = content;
+          }
+          res.writeHead(200);
+          res.end(JSON.stringify({ success: true }));
+        } catch (err) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    if (req.url.startsWith('/api/pin/') && req.method === 'POST') {
+      const id = parseInt(req.url.split('/')[3]);
+      if (db) { db.run('UPDATE clipboard_items SET is_pinned = 1 WHERE id = ?', [id]); saveDatabase(); }
+      res.writeHead(200);
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+
+    if (req.url.startsWith('/api/unpin/') && req.method === 'POST') {
+      const id = parseInt(req.url.split('/')[3]);
+      if (db) { db.run('UPDATE clipboard_items SET is_pinned = 0 WHERE id = ?', [id]); saveDatabase(); }
+      res.writeHead(200);
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+
+    if (req.url.startsWith('/api/delete/') && req.method === 'POST') {
+      const id = parseInt(req.url.split('/')[3]);
+      if (db) { db.run('DELETE FROM clipboard_items WHERE id = ?', [id]); saveDatabase(); }
+      res.writeHead(200);
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+
+    if (req.url.startsWith('/api/image/') && req.method === 'GET') {
+      const imagePath = decodeURIComponent(req.url.split('/api/image/')[1]);
+      try {
+        if (fs.existsSync(imagePath)) {
+          const ext = path.extname(imagePath).toLowerCase();
+          const ct = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif' };
+          res.writeHead(200, { 'Content-Type': ct[ext] || 'image/png' });
+          res.end(fs.readFileSync(imagePath));
+          return;
+        }
+      } catch (err) {}
+      res.writeHead(404);
+      res.end('Not found');
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('Not found');
+  });
+
+  webServer.on('listening', () => {
+    webServerRunning = true;
+    console.log(`Mobile web: http://${getLocalIP()}:${webServerPort}`);
+    updateTrayMenu();
+  });
+
+  webServer.on('error', (err) => {
+    console.error('Web server error:', err);
+    webServer = null;
+    webServerRunning = false;
+    updateTrayMenu();
+  });
+
+  webServer.listen(webServerPort, '0.0.0.0');
+}
+
+function stopWebServer() {
+  if (webServer) {
+    webServer.close();
+    webServer = null;
+    webServerRunning = false;
+    updateTrayMenu();
+  }
+}
+
+function updateTrayMenu() {
+  if (!tray) return;
+  const status = webServerRunning ? 'Web ON' : 'Web OFF';
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Show', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+    { type: 'separator' },
+    { label: `${status} - Click to toggle`, click: () => { webServerRunning ? stopWebServer() : startWebServer(); } },
+    { label: `http://${getLocalIP()}:${webServerPort}`, enabled: false },
+    { type: 'separator' },
+    { label: 'Exit', click: () => { app.isQuitting = true; app.quit(); } }
+  ]));
+  tray.setToolTip(`ClipboardHistory [${status}]`);
 }
 
 // IPC handlers
@@ -524,6 +665,7 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   stopClipboardWatcher();
+  stopWebServer();
 });
 
 app.on('activate', () => {
